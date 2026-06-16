@@ -8,7 +8,10 @@ import sys
 from html import unescape
 from datetime import datetime, timezone
 
-LIST_URL = "https://www.sportschau.de/thema/highlights"
+SOURCES = [
+    "https://www.sportschau.de/thema/highlights",
+    "https://www.sportschau.de/fussball/fifa-wm-2026/?typ=video",
+]
 
 
 def fetch(url):
@@ -25,7 +28,13 @@ def parse_date(iso):
     return f"{m.group(3)}.{m.group(2)}.{m.group(1)}" if m else ""
 
 
-def extract_list(html):
+def is_highlight(title, href):
+    t = title.lower()
+    h = href.lower()
+    return "highlight" in t or "highlight" in h
+
+
+def extract_items(html):
     html_u = unescape(html)
     date_by_url = {}
     for m in re.finditer(r'"broadcastedOnDateTime":"([^"]+)"', html_u):
@@ -34,8 +43,7 @@ def extract_list(html):
         if link_m:
             date_by_url[link_m.group(1)] = parse_date(m.group(1))
 
-    results = []
-    seen = set()
+    results = {}
     for href, inner in re.findall(
         r'<a\s[^>]*href="(/[^"]+)"[^>]*>(.*?)</a>', html, re.DOTALL | re.IGNORECASE
     ):
@@ -46,11 +54,13 @@ def extract_list(html):
             continue
         title = re.sub(r"<[^>]+>", "", heading.group(1)).strip()
         title = re.sub(r"\s+", " ", title)
-        if not title or href in seen:
+        if not title or not is_highlight(title, href):
             continue
-        seen.add(href)
+        # Canonical key: href ohne Hash-Suffix für Dedup
+        key = re.sub(r",[\w-]+\.html$", "", href)
         full_url = "https://www.sportschau.de" + href
-        results.append((title, full_url, date_by_url.get(full_url, "")))
+        if key not in results:
+            results[key] = (title, full_url, date_by_url.get(full_url, ""))
     return results
 
 
@@ -159,14 +169,26 @@ def generate_html(items, updated_at):
 
 
 def main():
-    print("Lade Highlights-Liste ...", file=sys.stderr)
-    html = fetch(LIST_URL)
-    items_raw = extract_list(html)
-    print(f"{len(items_raw)} Einträge gefunden.", file=sys.stderr)
+    merged = {}
+    for url in SOURCES:
+        print(f"Lade {url} ...", file=sys.stderr)
+        html = fetch(url)
+        items = extract_items(html)
+        new = {k: v for k, v in items.items() if k not in merged}
+        merged.update(new)
+        print(f"  {len(items)} Highlights, {len(new)} neu. Gesamt: {len(merged)}", file=sys.stderr)
 
+    # Sortieren: Datum absteigend, undatierte ans Ende
+    sorted_items = sorted(
+        merged.values(),
+        key=lambda x: x[2] if x[2] else "00.00.0000",
+        reverse=True,
+    )
+
+    print(f"\n{len(sorted_items)} Einträge gesamt. Hole Video-URLs ...", file=sys.stderr)
     items = []
-    for i, (title, page_url, date) in enumerate(items_raw, 1):
-        print(f"  [{i}/{len(items_raw)}] {title}", file=sys.stderr)
+    for i, (title, page_url, date) in enumerate(sorted_items, 1):
+        print(f"  [{i}/{len(sorted_items)}] {title}", file=sys.stderr)
         video_url = extract_video_url(page_url)
         items.append((title, page_url, date, video_url))
 
