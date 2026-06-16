@@ -28,9 +28,13 @@ def parse_date(iso):
     return f"{m.group(3)}.{m.group(2)}.{m.group(1)}" if m else ""
 
 
+EXCLUDE = ["paralympics"]
+
 def is_highlight(title, href):
     t = title.lower()
     h = href.lower()
+    if any(x in t or x in h for x in EXCLUDE):
+        return False
     return "highlight" in t or "highlight" in h
 
 
@@ -64,7 +68,10 @@ def extract_items(html):
     return results
 
 
-def extract_video_url(page_url):
+def extract_video_and_date(page_url):
+    """Returns (video_url, date_str) — either may be None."""
+    video_url = None
+    date_str = None
     try:
         html = fetch(page_url)
         for j in re.findall(
@@ -75,13 +82,18 @@ def extract_video_url(page_url):
             try:
                 d = json.loads(j)
                 for item in d if isinstance(d, list) else [d]:
-                    if item.get("@type") == "VideoObject" and "contentUrl" in item:
-                        return item["contentUrl"]
+                    if item.get("@type") == "VideoObject":
+                        if not video_url and "contentUrl" in item:
+                            video_url = item["contentUrl"]
+                        if not date_str:
+                            date_str = parse_date(item.get("datePublished") or item.get("dateModified"))
+                    elif not date_str and item.get("@type") in ("NewsArticle", "Article", "WebPage"):
+                        date_str = parse_date(item.get("datePublished") or item.get("dateModified"))
             except Exception:
                 pass
     except Exception as e:
         print(f"  Fehler bei {page_url}: {e}", file=sys.stderr)
-    return None
+    return video_url, date_str
 
 
 def generate_html(items, updated_at):
@@ -189,7 +201,9 @@ def main():
     items = []
     for i, (title, page_url, date) in enumerate(sorted_items, 1):
         print(f"  [{i}/{len(sorted_items)}] {title}", file=sys.stderr)
-        video_url = extract_video_url(page_url)
+        video_url, page_date = extract_video_and_date(page_url)
+        if not date and page_date:
+            date = page_date
         items.append((title, page_url, date, video_url))
 
     updated_at = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
