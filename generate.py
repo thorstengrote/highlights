@@ -6,12 +6,14 @@ import re
 import json
 import sys
 from html import unescape
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 SOURCES = [
     "https://www.sportschau.de/thema/highlights",
     "https://www.sportschau.de/fussball/fifa-wm-2026/?typ=video",
 ]
+
+CEST = timezone(timedelta(hours=2))
 
 
 def fetch(url):
@@ -23,12 +25,33 @@ def fetch(url):
         return r.read().decode("utf-8", errors="replace")
 
 
-def parse_date(iso):
-    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", iso or "")
-    return f"{m.group(3)}.{m.group(2)}.{m.group(1)}" if m else ""
+def parse_iso(raw):
+    """Return ISO datetime string normalized to UTC, or '' on failure."""
+    if not raw:
+        return ""
+    # Handle +0000 / +00:00 / Z suffixes
+    raw = re.sub(r"\+0000$", "+00:00", raw.strip())
+    raw = re.sub(r"Z$", "+00:00", raw)
+    try:
+        return datetime.fromisoformat(raw).astimezone(timezone.utc).isoformat()
+    except Exception:
+        m = re.match(r"(\d{4})-(\d{2})-(\d{2})", raw)
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}T00:00:00+00:00" if m else ""
+
+
+def format_datetime(iso):
+    """'2026-06-16T01:00:00+00:00' → '16.06. 03:00' (CEST)"""
+    if not iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso).astimezone(CEST)
+        return dt.strftime("%d.%m.&thinsp;%H:%M")
+    except Exception:
+        return ""
 
 
 EXCLUDE = ["paralympics"]
+
 
 def is_highlight(title, href):
     t = title.lower()
@@ -40,12 +63,12 @@ def is_highlight(title, href):
 
 def extract_items(html):
     html_u = unescape(html)
-    date_by_url = {}
+    iso_by_url = {}
     for m in re.finditer(r'"broadcastedOnDateTime":"([^"]+)"', html_u):
         after = html_u[m.start() : m.start() + 600]
         link_m = re.search(r'"link":"(https://www\.sportschau\.de[^"]+)"', after)
         if link_m:
-            date_by_url[link_m.group(1)] = parse_date(m.group(1))
+            iso_by_url[link_m.group(1)] = parse_iso(m.group(1))
 
     results = {}
     for href, inner in re.findall(
@@ -60,18 +83,17 @@ def extract_items(html):
         title = re.sub(r"\s+", " ", title)
         if not title or not is_highlight(title, href):
             continue
-        # Canonical key: href ohne Hash-Suffix für Dedup
         key = re.sub(r",[\w-]+\.html$", "", href)
         full_url = "https://www.sportschau.de" + href
         if key not in results:
-            results[key] = (title, full_url, date_by_url.get(full_url, ""))
+            results[key] = (title, full_url, iso_by_url.get(full_url, ""))
     return results
 
 
-def extract_video_and_date(page_url):
-    """Returns (video_url, date_str) — either may be None."""
+def extract_video_and_iso(page_url):
+    """Returns (video_url, iso_str) — either may be None."""
     video_url = None
-    date_str = None
+    iso_str = None
     try:
         html = fetch(page_url)
         for j in re.findall(
@@ -85,25 +107,26 @@ def extract_video_and_date(page_url):
                     if item.get("@type") == "VideoObject":
                         if not video_url and "contentUrl" in item:
                             video_url = item["contentUrl"]
-                        if not date_str:
-                            date_str = parse_date(item.get("datePublished") or item.get("dateModified"))
-                    elif not date_str and item.get("@type") in ("NewsArticle", "Article", "WebPage"):
-                        date_str = parse_date(item.get("datePublished") or item.get("dateModified"))
+                        if not iso_str:
+                            iso_str = parse_iso(item.get("datePublished") or item.get("dateModified"))
+                    elif not iso_str and item.get("@type") in ("NewsArticle", "Article", "WebPage"):
+                        iso_str = parse_iso(item.get("datePublished") or item.get("dateModified"))
             except Exception:
                 pass
     except Exception as e:
         print(f"  Fehler bei {page_url}: {e}", file=sys.stderr)
-    return video_url, date_str
+    return video_url, iso_str
 
 
 def generate_html(items, updated_at):
     rows = []
-    for i, (title, page_url, date, video_url) in enumerate(items, 1):
+    for i, (title, page_url, iso, video_url) in enumerate(items, 1):
         if video_url:
             link = f'<a href="{video_url}" target="_blank" rel="noopener">{title}</a>'
         else:
             link = f'<span class="no-video">{title}</span>'
-        date_cell = f'<td class="date">{date}</td>' if date else '<td class="date"></td>'
+        display = format_datetime(iso)
+        date_cell = f'<td class="date">{display}</td>'
         rows.append(f"<tr><td class='num'>{i}</td>{date_cell}<td>{link}</td></tr>")
 
     rows_html = "\n        ".join(rows)
@@ -154,7 +177,7 @@ def generate_html(items, updated_at):
       color: #888;
       font-size: 0.82rem;
       white-space: nowrap;
-      width: 7rem;
+      width: 6.5rem;
     }}
     a {{
       color: #e0e0e0;
@@ -190,21 +213,17 @@ def main():
         merged.update(new)
         print(f"  {len(items)} Highlights, {len(new)} neu. Gesamt: {len(merged)}", file=sys.stderr)
 
-    # Sortieren: Datum absteigend, undatierte ans Ende
-    sorted_items = sorted(
-        merged.values(),
-        key=lambda x: x[2] if x[2] else "00.00.0000",
-        reverse=True,
-    )
-
-    print(f"\n{len(sorted_items)} Einträge gesamt. Hole Video-URLs ...", file=sys.stderr)
+    print(f"\n{len(merged)} Einträge. Hole Video-URLs ...", file=sys.stderr)
     items = []
-    for i, (title, page_url, date) in enumerate(sorted_items, 1):
-        print(f"  [{i}/{len(sorted_items)}] {title}", file=sys.stderr)
-        video_url, page_date = extract_video_and_date(page_url)
-        if not date and page_date:
-            date = page_date
-        items.append((title, page_url, date, video_url))
+    for i, (title, page_url, iso) in enumerate(merged.values(), 1):
+        print(f"  [{i}/{len(merged)}] {title}", file=sys.stderr)
+        video_url, page_iso = extract_video_and_iso(page_url)
+        if not iso and page_iso:
+            iso = page_iso
+        items.append((title, page_url, iso, video_url))
+
+    # Neueste oben, undatierte ans Ende
+    items.sort(key=lambda x: x[2] if x[2] else "0000", reverse=True)
 
     updated_at = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
     html_out = generate_html(items, updated_at)
