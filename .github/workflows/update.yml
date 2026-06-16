@@ -2,7 +2,8 @@ name: Update Highlights
 
 on:
   schedule:
-    - cron: "0 */2 * * *"   # alle 2 Stunden
+    - cron: "*/15 4-6 * * *"  # alle 15 Min, 6–9 Uhr CEST (WM-Frühstück)
+    - cron: "0 */2 * * *"     # alle 2h den Rest des Tages
   push:
     branches: [main]
   workflow_dispatch:          # manuell auslösbar
