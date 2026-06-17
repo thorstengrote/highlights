@@ -16,6 +16,7 @@ SPORTSCHAU_SOURCES = [
     "https://www.sportschau.de/fussball/fifa-wm-2026/?typ=video",
 ]
 YT_CHANNEL = "https://www.youtube.com/@MAGENTASPORT"
+YT_CHANNEL_ID = "UChr7ZXDFiPOEl543HM4Aj8g"
 YT_LIMIT = 80
 CEST = timezone(timedelta(hours=2))
 
@@ -108,10 +109,13 @@ def _clean_yt_for_teams(t):
 
 def _team_key(title):
     t = title.strip()
-    # Sportschau: "WM 2026 [T1] gegen [T2] - die [langen] Highlights"
+    # Sportschau game: "WM 2026 T1 gegen T2 - die Highlights"
     m = re.match(r"WM \d{4}\s+(.+?)\s+gegen\s+(.+?)(?:\s*-.*)?$", t, re.I)
     if m:
         return "|".join(sorted([_norm_name(m.group(1)), _norm_name(m.group(2))]))
+    # Other Sportschau titles starting with "WM YYYY" → no game key
+    if re.match(r"WM \d{4}", t, re.I):
+        return None
     # YouTube: clean noise first, then split on separator
     t2 = _clean_yt_for_teams(t)
     parts = re.split(r"\s+(?:vs\.|vs|gegen|-)\s+", t2)
@@ -309,6 +313,10 @@ def _ytdlp_fetch(url):
             continue
         vid = d.get("id", "")
         if not vid:
+            continue
+        # Only accept videos from the MagentaSport channel
+        cid = d.get("channel_id") or d.get("uploader_id") or ""
+        if cid and cid != YT_CHANNEL_ID:
             continue
         dur = d.get("duration")
         raw.append({
@@ -535,10 +543,6 @@ def main():
     print(f"\nHole YouTube-Highlights ...", file=sys.stderr)
     yt_list = _fetch_yt()
     yt_by_key = {yt["team_key"]: yt for yt in yt_list if yt.get("team_key")}
-    print(f"  yt_by_key ({len(yt_by_key)}): {list(yt_by_key.keys())}", file=sys.stderr)
-    sp_keys = {item[4] for item in sp_items if item[4]}
-    print(f"  sp_keys ({len(sp_keys)}): {list(sp_keys)[:8]}", file=sys.stderr)
-    print(f"  matches: {[k for k in yt_by_key if k in sp_keys]}", file=sys.stderr)
 
     combined = []
     used_keys = set()
