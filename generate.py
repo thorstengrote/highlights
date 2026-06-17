@@ -196,9 +196,34 @@ def _fmt_date(iso):
     if not iso:
         return ""
     try:
-        return datetime.fromisoformat(iso).astimezone(CEST).strftime("%d.%m.")
+        dt = datetime.fromisoformat(iso).astimezone(CEST)
+        # Show time only if it's not midnight (i.e., a real timestamp, not just a date)
+        if dt.hour == 0 and dt.minute == 0:
+            return dt.strftime("%d.%m.")
+        return dt.strftime("%d.%m. %H:%M")
     except Exception:
         return ""
+
+def _get_yt_date(video_url):
+    """Fetch publish date from a YouTube video page."""
+    try:
+        html = _http(video_url)
+        for blob in re.findall(
+            r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>',
+            html, re.DOTALL | re.IGNORECASE
+        ):
+            try:
+                d = json.loads(blob)
+                for item in (d if isinstance(d, list) else [d]):
+                    if item.get("@type") == "VideoObject":
+                        pub = item.get("datePublished") or item.get("uploadDate")
+                        if pub:
+                            return _parse_iso(pub)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return ""
 
 # ---------- Sportschau ----------
 
@@ -567,9 +592,10 @@ def main():
         })
 
     # YouTube-only: add if from the WM playlist (always valid) or recognised WM teams
+    yt_only_entries = []
     for key, yt in yt_by_key.items():
         if key not in used_keys and (yt.get("from_playlist") or _is_wm_team_key(key)):
-            combined.append({
+            yt_only_entries.append({
                 "title": _display_title(yt["title"]),
                 "iso": "",
                 "ard_url": None,
@@ -578,12 +604,19 @@ def main():
                 "yt_dur": yt["duration_sec"],
             })
 
+    # Fetch dates for YouTube-only entries
+    if yt_only_entries:
+        print(f"  Hole Datum für {len(yt_only_entries)} YT-only Einträge ...", file=sys.stderr)
+        for entry in yt_only_entries:
+            entry["iso"] = _get_yt_date(entry["yt_url"])
+    combined.extend(yt_only_entries)
+
     # Drop entries with no links at all (audio-only, text summaries)
     combined = [c for c in combined if c.get("ard_url") or c.get("yt_url")]
 
     combined.sort(key=lambda x: x["iso"] or "0000", reverse=True)
 
-    ts = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+    ts = datetime.now(CEST).strftime("%d.%m.%Y %H:%M")
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(_generate_html(combined, ts))
     print("index.html geschrieben.", file=sys.stderr)
