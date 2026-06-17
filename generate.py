@@ -207,22 +207,18 @@ def _fmt_date(iso):
 
 def _get_yt_date(video_url):
     """Get publish date for a YouTube video. Returns 'YYYY-MM-DD' or ''."""
-    # Try yt-dlp (reliable on all servers)
-    try:
-        r = subprocess.run(
-            ["yt-dlp", "--dump-json", "--no-playlist", "--no-warnings", video_url],
-            capture_output=True, text=True, timeout=30,
-        )
-        d = json.loads(r.stdout)
-        ud = d.get("upload_date") or ""  # "YYYYMMDD"
-        print(f"    yt-dlp date for {video_url[-11:]}: ud={ud!r} ts={d.get('timestamp')}", file=sys.stderr)
-        if len(ud) == 8:
-            return f"{ud[:4]}-{ud[4:6]}-{ud[6:8]}"
-        ts = d.get("timestamp") or d.get("release_timestamp")
-        if ts:
-            return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
-    except Exception as e:
-        print(f"    yt-dlp date error: {e}", file=sys.stderr)
+    # Try yt-dlp --print (lightweight, less likely to hit consent wall)
+    for extra in [[], ["--extractor-args", "youtube:player_client=web"]]:
+        try:
+            r = subprocess.run(
+                ["yt-dlp", "--print", "upload_date", "--no-warnings"] + extra + [video_url],
+                capture_output=True, text=True, timeout=30,
+            )
+            ud = (r.stdout.strip().splitlines() or [""])[0].strip()
+            if len(ud) == 8 and ud.isdigit():
+                return f"{ud[:4]}-{ud[4:6]}-{ud[6:8]}"
+        except Exception:
+            pass
     # Fallback: scrape ytInitialData
     try:
         html = _http(video_url)
