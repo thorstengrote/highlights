@@ -75,7 +75,7 @@ def _norm_name(name):
     if n in _NORM:
         return _NORM[n]
     n2 = (n.replace("ü", "u").replace("ö", "o").replace("ä", "a")
-          .replace("ß", "ss").replace("é", "e").replace("ç", "c").replace("’", "'"))
+          .replace("ß", "ss").replace("é", "e").replace("ç", "c").replace("'", "'"))
     if n2 in _NORM:
         return _NORM[n2]
     return n2
@@ -122,7 +122,6 @@ def _parse_iso_dur(d):
 
 
 def _parse_mmss(text):
-    """'5:32' → 332, '1:05:32' → 3932."""
     if not text:
         return None
     parts = text.split(":")
@@ -240,8 +239,8 @@ def _extract_video(page_url):
 
 # ---------- YouTube ----------
 
-def _yt_filter(items_raw):
-    """Deduplicate and filter highlight videos from a raw list of {title,url,duration_sec}."""
+def _yt_filter(items_raw, label=""):
+    """Filter for highlight videos, deduplicate by team key."""
     out = []
     seen_keys = set()
     for item in items_raw:
@@ -255,22 +254,23 @@ def _yt_filter(items_raw):
         if key:
             seen_keys.add(key)
         out.append({**item, "team_key": key})
+    if label:
+        print(f"  {label}: {len(out)} Highlights aus {len(items_raw)} Videos", file=sys.stderr)
     return out
 
 
-def _fetch_yt_ytdlp():
-    """Try yt-dlp --flat-playlist."""
+def _ytdlp_fetch(url):
+    """Run yt-dlp --flat-playlist on url, return raw list of {title,url,duration_sec}."""
     try:
         r = subprocess.run(
             ["yt-dlp", "--flat-playlist", "--dump-json",
-             "--playlist-end", str(YT_LIMIT), "--no-warnings",
-             YT_CHANNEL + "/videos"],
+             "--playlist-end", str(YT_LIMIT), "--no-warnings", url],
             capture_output=True, text=True, timeout=120,
         )
         if r.returncode != 0 and r.stderr:
-            print(f"  yt-dlp rc={r.returncode}: {r.stderr[:200]}", file=sys.stderr)
+            print(f"  yt-dlp rc={r.returncode}: {r.stderr[:150]}", file=sys.stderr)
     except Exception as e:
-        print(f"  yt-dlp unavailable: {e}", file=sys.stderr)
+        print(f"  yt-dlp error: {e}", file=sys.stderr)
         return []
     raw = []
     for line in r.stdout.splitlines():
@@ -303,20 +303,18 @@ def _find_video_renderers(obj):
             yield from _find_video_renderers(item)
 
 
-def _fetch_yt_html():
-    """Fall back: parse ytInitialData from the YouTube channel page."""
+def _ythtml_fetch(url):
+    """Parse ytInitialData from a YouTube page, return raw list."""
     try:
-        html = _http(YT_CHANNEL + "/videos")
+        html = _http(url)
         idx = html.find("var ytInitialData = ")
         if idx == -1:
-            print("  ytInitialData marker not found", file=sys.stderr)
             return []
         idx += len("var ytInitialData = ")
         data, _ = json.JSONDecoder().raw_decode(html, idx)
     except Exception as e:
-        print(f"  ytInitialData parse error: {e}", file=sys.stderr)
+        print(f"  ytInitialData error: {e}", file=sys.stderr)
         return []
-
     raw = []
     for vd in _find_video_renderers(data):
         vid = vd.get("videoId", "")
@@ -326,7 +324,7 @@ def _fetch_yt_html():
         title = "".join(r.get("text", "") for r in runs)
         if not title:
             continue
-        dur_text = (vd.get("lengthText") or vd.get("length", {})).get("simpleText", "")
+        dur_text = (vd.get("lengthText") or vd.get("length") or {}).get("simpleText", "")
         raw.append({
             "title": title,
             "url": f"https://www.youtube.com/watch?v={vid}",
@@ -335,15 +333,50 @@ def _fetch_yt_html():
     return raw
 
 
+def _merge_yt(existing, new_items):
+    """Merge new_items into existing list, dedup by team_key and url."""
+    seen_keys = {i["team_key"] for i in existing if i.get("team_key")}
+    seen_urls = {i["url"] for i in existing}
+    for item in new_items:
+        k = item.get("team_key")
+        if item["url"] in seen_urls:
+            continue
+        if k and k in seen_keys:
+            continue
+        if k:
+            seen_keys.add(k)
+        seen_urls.add(item["url"])
+        existing.append(item)
+    return existing
+
+
 def _fetch_yt():
-    raw = _fetch_yt_ytdlp()
-    if len(raw) < 5:
-        print(f"  yt-dlp returned {len(raw)} items, trying ytInitialData ...", file=sys.stderr)
-        raw2 = _fetch_yt_html()
-        if len(raw2) > len(raw):
-            raw = raw2
-    items = _yt_filter(raw)
-    print(f"  {len(items)} YouTube-Highlights (aus {len(raw)} Videos).", file=sys.stderr)
+    """Try multiple strategies to get YouTube highlights."""
+    # Strategy 1: yt-dlp on /videos
+    raw = _ytdlp_fetch(YT_CHANNEL + "/videos")
+    items = _yt_filter(raw, "yt-dlp /videos")
+    if len(items) < 5:
+        print(f"  sample titles: {[r['title'][:50] for r in raw[:3]]}", file=sys.stderr)
+
+    # Strategy 2: yt-dlp on channel search
+    if len(items) < 5:
+        raw2 = _ytdlp_fetch(YT_CHANNEL + "/search?query=WM+2026+Highlights")
+        items2 = _yt_filter(raw2, "yt-dlp search")
+        items = _merge_yt(items, items2)
+
+    # Strategy 3: ytInitialData on /videos
+    if len(items) < 5:
+        raw3 = _ythtml_fetch(YT_CHANNEL + "/videos")
+        items3 = _yt_filter(raw3, "ytInitialData /videos")
+        items = _merge_yt(items, items3)
+
+    # Strategy 4: ytInitialData on channel search
+    if len(items) < 5:
+        raw4 = _ythtml_fetch(YT_CHANNEL + "/search?query=WM+2026+Highlights")
+        items4 = _yt_filter(raw4, "ytInitialData search")
+        items = _merge_yt(items, items4)
+
+    print(f"  → {len(items)} YouTube-Highlights gesamt.", file=sys.stderr)
     return items
 
 # ---------- HTML ----------
