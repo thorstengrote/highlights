@@ -215,13 +215,14 @@ def _get_yt_date(video_url):
         )
         d = json.loads(r.stdout)
         ud = d.get("upload_date") or ""  # "YYYYMMDD"
+        print(f"    yt-dlp date for {video_url[-11:]}: ud={ud!r} ts={d.get('timestamp')}", file=sys.stderr)
         if len(ud) == 8:
             return f"{ud[:4]}-{ud[4:6]}-{ud[6:8]}"
         ts = d.get("timestamp") or d.get("release_timestamp")
         if ts:
             return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"    yt-dlp date error: {e}", file=sys.stderr)
     # Fallback: scrape ytInitialData
     try:
         html = _http(video_url)
