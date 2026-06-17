@@ -28,6 +28,10 @@ jobs:
       - uses: actions/checkout@v4
         if: steps.wm.outputs.active == 'true'
 
+      - name: Install yt-dlp
+        if: steps.wm.outputs.active == 'true'
+        run: pip install -q yt-dlp
+
       - name: Generate index.html
         if: steps.wm.outputs.active == 'true'
         run: python3 generate.py
