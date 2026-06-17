@@ -18,6 +18,10 @@ SPORTSCHAU_SOURCES = [
 YT_CHANNEL = "https://www.youtube.com/@MAGENTASPORT"
 YT_CHANNEL_ID = "UChr7ZXDFiPOEl543HM4Aj8g"
 YT_WM_PLAYLIST = "https://www.youtube.com/playlist?list=PLSTUQ-Z10W594c6BwieXpQa1WtbhYSeIV"
+ESPN_SCHEDULE_URL = (
+    "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world"
+    "/scoreboard?dates=20260611-20260719&limit=200"
+)
 YT_LIMIT = 100
 CEST = timezone(timedelta(hours=2))
 
@@ -74,6 +78,13 @@ _NORM = {
     "usbekistan": "uzbekistan", "uzbekistan": "uzbekistan",
     "china": "china", "indonesien": "indonesia", "indonesia": "indonesia",
     "neuseeland": "new zealand",
+    # ESPN spellings
+    "czechia": "czech republic",
+    "türkiye": "turkey", "turkiye": "turkey",
+    "united states": "usa",
+    "bosnia-herzegovina": "bosnia",
+    "congo dr": "congo dr", "dr congo": "congo dr", "kongo": "congo dr",
+    "ivory coast": "ivory coast",
 }
 
 _WM_TEAM_NAMES = set(_NORM.values())
@@ -217,6 +228,40 @@ def _get_yt_date(video_url):
     except Exception:
         pass
     return ""
+
+# ---------- WM Schedule ----------
+
+def _fetch_wm_schedule():
+    """Fetch WM 2026 kickoff times from ESPN. Returns {team_key: kickoff_iso_utc}."""
+    try:
+        req = urllib.request.Request(
+            ESPN_SCHEDULE_URL, headers={"User-Agent": "Mozilla/5.0", "Accept-Encoding": "identity"}
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            d = json.loads(r.read().decode("utf-8", errors="replace"))
+        schedule = {}
+        skip = {"group", "winner", "loser", "place", "round", "semifinal", "quarterfinal"}
+        for event in d.get("events", []):
+            date_str = event.get("date", "")
+            iso = _parse_iso(date_str)
+            if not iso:
+                continue
+            comps = event.get("competitions", [{}])[0].get("competitors", [])
+            names = [c.get("team", {}).get("displayName", "") for c in comps]
+            if len(names) != 2:
+                continue
+            t1 = _norm_name(names[0])
+            t2 = _norm_name(names[1])
+            # Skip placeholder entries (group winners, etc.)
+            if any(s in t1 or s in t2 for s in skip):
+                continue
+            key = "|".join(sorted([t1, t2]))
+            schedule[key] = iso
+        print(f"  WM-Spielplan: {len(schedule)} Spiele geladen.", file=sys.stderr)
+        return schedule
+    except Exception as e:
+        print(f"  WM-Spielplan Fehler: {e}", file=sys.stderr)
+        return {}
 
 # ---------- Sportschau ----------
 
@@ -565,6 +610,9 @@ def main():
             sp_seen.add(key)
         sp_items.append(item)
 
+    print(f"\nHole WM-Spielplan ...", file=sys.stderr)
+    schedule = _fetch_wm_schedule()  # {team_key: kickoff_iso_utc}
+
     print(f"\nHole YouTube-Highlights ...", file=sys.stderr)
     yt_list = _fetch_yt()
     yt_by_key = {yt["team_key"]: yt for yt in yt_list if yt.get("team_key")}
@@ -577,7 +625,7 @@ def main():
             used_keys.add(key)
         combined.append({
             "title": _display_title(title),
-            "iso": iso,
+            "iso": schedule.get(key) or iso,  # Anstoßzeit bevorzugt
             "ard_url": ard_url,
             "ard_dur": ard_dur,
             "yt_url": yt["url"] if yt else None,
@@ -590,18 +638,12 @@ def main():
         if key not in used_keys and (yt.get("from_playlist") or _is_wm_team_key(key)):
             yt_only_entries.append({
                 "title": _display_title(yt["title"]),
-                "iso": "",
+                "iso": schedule.get(key) or "",  # Anstoßzeit aus Spielplan
                 "ard_url": None,
                 "ard_dur": None,
                 "yt_url": yt["url"],
                 "yt_dur": yt["duration_sec"],
             })
-
-    # Fetch dates for YouTube-only entries
-    if yt_only_entries:
-        print(f"  Hole Datum für {len(yt_only_entries)} YT-only Einträge ...", file=sys.stderr)
-        for entry in yt_only_entries:
-            entry["iso"] = _get_yt_date(entry["yt_url"])
     combined.extend(yt_only_entries)
 
     # Drop entries with no links at all (audio-only, text summaries)
