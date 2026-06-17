@@ -1,35 +1,139 @@
 #!/usr/bin/env python3
-"""Fetches Sportschau highlights and generates index.html."""
+"""Fetches Sportschau + MagentaSport highlights and generates index.html."""
 
 import urllib.request
 import re
 import json
 import sys
+import subprocess
 from html import unescape
 from datetime import datetime, timezone, timedelta
 
-SOURCES = [
+# ---------- config ----------
+
+SPORTSCHAU_SOURCES = [
     "https://www.sportschau.de/thema/highlights",
     "https://www.sportschau.de/fussball/fifa-wm-2026/?typ=video",
 ]
-
+YT_URL = "https://www.youtube.com/@MAGENTASPORT/videos"
+YT_LIMIT = 80
 CEST = timezone(timedelta(hours=2))
 
+# ---------- team normalisation ----------
 
-def fetch(url):
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "Mozilla/5.0", "Accept-Encoding": "identity"},
-    )
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return r.read().decode("utf-8", errors="replace")
+_NORM = {
+    "neuseeland": "new zealand", "new zealand": "new zealand",
+    "saudi-arabien": "saudi arabia", "saudi arabia": "saudi arabia",
+    "kap verde": "cape verde", "cape verde": "cape verde", "cabo verde": "cape verde",
+    "elfenbeinküste": "ivory coast", "elfenbeinkuste": "ivory coast", "ivory coast": "ivory coast",
+    "côte d'ivoire": "ivory coast", "cote d'ivoire": "ivory coast",
+    "bosnien und herzegowina": "bosnia", "bosnien": "bosnia",
+    "bosnia and herzegovina": "bosnia", "bosnia": "bosnia",
+    "tschechien": "czech republic", "czech republic": "czech republic",
+    "südkorea": "south korea", "south korea": "south korea",
+    "südafrika": "south africa", "south africa": "south africa",
+    "ägypten": "egypt", "agypten": "egypt", "egypt": "egypt",
+    "türkei": "turkey", "turkei": "turkey", "turkey": "turkey",
+    "katar": "qatar", "qatar": "qatar",
+    "schweiz": "switzerland", "switzerland": "switzerland",
+    "niederlande": "netherlands", "netherlands": "netherlands",
+    "schottland": "scotland", "scotland": "scotland",
+    "marokko": "morocco", "morocco": "morocco",
+    "norwegen": "norway", "norway": "norway",
+    "algerien": "algeria", "algeria": "algeria",
+    "tunesien": "tunisia", "tunisia": "tunisia",
+    "schweden": "sweden", "sweden": "sweden",
+    "belgien": "belgium", "belgium": "belgium",
+    "frankreich": "france", "france": "france",
+    "spanien": "spain", "spain": "spain",
+    "brasilien": "brazil", "brazil": "brazil",
+    "kanada": "canada", "canada": "canada",
+    "mexiko": "mexico", "mexico": "mexico",
+    "australien": "australia", "australia": "australia",
+    "deutschland": "germany", "germany": "germany",
+    "curaçao": "curacao", "curacao": "curacao",
+    "argentinien": "argentina", "argentina": "argentina",
+    "vereinigte staaten": "usa", "usa": "usa",
+    "haiti": "haiti", "irak": "iraq", "iraq": "iraq",
+    "iran": "iran", "japan": "japan", "portugal": "portugal",
+    "england": "england", "kroatien": "croatia", "croatia": "croatia",
+    "serbien": "serbia", "serbia": "serbia",
+    "österreich": "austria", "osterreich": "austria", "austria": "austria",
+    "ungarn": "hungary", "hungary": "hungary",
+    "senegal": "senegal", "kamerun": "cameroon", "cameroon": "cameroon",
+    "ghana": "ghana", "nigeria": "nigeria", "kolumbien": "colombia", "colombia": "colombia",
+    "ecuador": "ecuador", "chile": "chile", "bolivien": "bolivia", "bolivia": "bolivia",
+    "peru": "peru", "venezuela": "venezuela", "jamaika": "jamaica", "jamaica": "jamaica",
+    "costa rica": "costa rica", "panama": "panama", "honduras": "honduras",
+    "el salvador": "el salvador", "guatemala": "guatemala",
+    "neuseeland": "new zealand",
+}
 
 
-def parse_iso(raw):
-    """Return ISO datetime string normalized to UTC, or '' on failure."""
+def _norm_name(name):
+    n = re.sub(r"(?i)^(?:die|der|das|dem|den)\s+", "", name.strip().lower())
+    if n in _NORM:
+        return _NORM[n]
+    n2 = (n.replace("ü", "u").replace("ö", "o").replace("ä", "a")
+          .replace("ß", "ss").replace("é", "e").replace("ç", "c").replace("’", "'"))
+    if n2 in _NORM:
+        return _NORM[n2]
+    return n2
+
+
+def _team_key(title):
+    t = title.strip()
+    # Sportschau: "WM 2026 [T1] gegen [T2] - die [langen] Highlights"
+    m = re.match(r"WM \d{4}\s+(.+?)\s+gegen\s+(.+?)(?:\s*-.*)?$", t, re.I)
+    if m:
+        return "|".join(sorted([_norm_name(m.group(1)), _norm_name(m.group(2))]))
+    # YouTube: "T1 - T2 | ..." or "T1 vs. T2 | ..."
+    t2 = re.split(r"\s*\|\s*", t)[0].strip()
+    t2 = re.sub(r",\s*(Highlights|FIFA|World Cup).*$", "", t2, flags=re.I).strip()
+    parts = re.split(r"\s+(?:vs\.|vs|gegen|-)\s+", t2)
+    if len(parts) == 2:
+        return "|".join(sorted([_norm_name(parts[0]), _norm_name(parts[1])]))
+    return None
+
+
+def _display_title(title):
+    """'WM 2026 Iran gegen Neuseeland - ...' → 'Iran – Neuseeland'"""
+    t = title.strip()
+    m = re.match(r"WM \d{4}\s+(.+?)\s+gegen\s+(.+?)(?:\s*-\s*die.*)?$", t, re.I)
+    if m:
+        t1 = re.sub(r"(?i)^(?:die|der|das|dem|den)\s+", "", m.group(1)).strip()
+        t2 = re.sub(r"(?i)^(?:die|der|das|dem|den)\s+", "", m.group(2)).strip()
+        return f"{t1} – {t2}"
+    # YouTube format
+    t2 = re.split(r"\s*\|\s*", t)[0].strip()
+    t2 = re.sub(r",\s*(Highlights|FIFA|World Cup).*$", "", t2, flags=re.I).strip()
+    t2 = re.sub(r"\s+vs\.\s+", " – ", t2)
+    t2 = re.sub(r"\s+-\s+", " – ", t2)
+    return t2
+
+# ---------- duration ----------
+
+def _parse_iso_dur(d):
+    if not d:
+        return None
+    m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", d)
+    if not m:
+        return None
+    total = int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60 + int(m.group(3) or 0)
+    return total or None
+
+
+def _fmt_dur(secs):
+    if not secs:
+        return ""
+    m, s = divmod(int(secs), 60)
+    return f"{m}:{s:02d}"
+
+# ---------- datetime ----------
+
+def _parse_iso(raw):
     if not raw:
         return ""
-    # Handle +0000 / +00:00 / Z suffixes
     raw = re.sub(r"\+0000$", "+00:00", raw.strip())
     raw = re.sub(r"Z$", "+00:00", raw)
     try:
@@ -39,197 +143,279 @@ def parse_iso(raw):
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}T00:00:00+00:00" if m else ""
 
 
-def format_datetime(iso):
-    """'2026-06-16T01:00:00+00:00' → '16.06. 03:00' (CEST)"""
+def _fmt_date(iso):
     if not iso:
         return ""
     try:
-        dt = datetime.fromisoformat(iso).astimezone(CEST)
-        return dt.strftime("%d.%m.&thinsp;%H:%M")
+        return datetime.fromisoformat(iso).astimezone(CEST).strftime("%d.%m.")
     except Exception:
         return ""
 
+# ---------- Sportschau fetch ----------
 
-EXCLUDE = ["paralympics"]
-
-
-def is_highlight(title, href):
-    t = title.lower()
-    h = href.lower()
-    if any(x in t or x in h for x in EXCLUDE):
-        return False
-    return "highlight" in t or "highlight" in h
+def _http(url):
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0", "Accept-Encoding": "identity"}
+    )
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return r.read().decode("utf-8", errors="replace")
 
 
-def extract_items(html):
-    html_u = unescape(html)
+_EXCLUDE = ["paralympics"]
+
+
+def _is_highlight(title, href):
+    t, h = title.lower(), href.lower()
+    return (
+        not any(x in t or x in h for x in _EXCLUDE)
+        and ("highlight" in t or "highlight" in h)
+    )
+
+
+def _extract_listing(html):
+    hu = unescape(html)
     iso_by_url = {}
-    for m in re.finditer(r'"broadcastedOnDateTime":"([^"]+)"', html_u):
-        after = html_u[m.start() : m.start() + 600]
-        link_m = re.search(r'"link":"(https://www\.sportschau\.de[^"]+)"', after)
-        if link_m:
-            iso_by_url[link_m.group(1)] = parse_iso(m.group(1))
-
-    results = {}
+    for m in re.finditer(r'"broadcastedOnDateTime":"([^"]+)"', hu):
+        after = hu[m.start(): m.start() + 600]
+        lm = re.search(r'"link":"(https://www\.sportschau\.de[^"]+)"', after)
+        if lm:
+            iso_by_url[lm.group(1)] = _parse_iso(m.group(1))
+    out = {}
     for href, inner in re.findall(
         r'<a\s[^>]*href="(/[^"]+)"[^>]*>(.*?)</a>', html, re.DOTALL | re.IGNORECASE
     ):
-        heading = re.search(
-            r"<h[1-6][^>]*>(.*?)</h[1-6]>", inner, re.DOTALL | re.IGNORECASE
-        )
-        if not heading:
+        h2 = re.search(r"<h[1-6][^>]*>(.*?)</h[1-6]>", inner, re.DOTALL | re.IGNORECASE)
+        if not h2:
             continue
-        title = re.sub(r"<[^>]+>", "", heading.group(1)).strip()
-        title = re.sub(r"\s+", " ", title)
-        if not title or not is_highlight(title, href):
+        title = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", h2.group(1))).strip()
+        if not title or not _is_highlight(title, href):
             continue
         key = re.sub(r",[\w-]+\.html$", "", href)
-        full_url = "https://www.sportschau.de" + href
-        if key not in results:
-            results[key] = (title, full_url, iso_by_url.get(full_url, ""))
-    return results
+        full = "https://www.sportschau.de" + href
+        if key not in out:
+            out[key] = (title, full, iso_by_url.get(full, ""))
+    return out
 
 
-def extract_video_and_iso(page_url):
-    """Returns (video_url, iso_str) — either may be None."""
-    video_url = None
-    iso_str = None
+def _extract_video(page_url):
+    video_url = iso_str = None
+    dur = None
     try:
-        html = fetch(page_url)
-        for j in re.findall(
+        html = _http(page_url)
+        for blob in re.findall(
             r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>',
-            html,
-            re.DOTALL | re.IGNORECASE,
+            html, re.DOTALL | re.IGNORECASE
         ):
             try:
-                d = json.loads(j)
-                for item in d if isinstance(d, list) else [d]:
+                d = json.loads(blob)
+                for item in (d if isinstance(d, list) else [d]):
                     if item.get("@type") == "VideoObject":
-                        if not video_url and "contentUrl" in item:
-                            video_url = item["contentUrl"]
-                        if not iso_str:
-                            iso_str = parse_iso(item.get("datePublished") or item.get("dateModified"))
+                        video_url = video_url or item.get("contentUrl")
+                        dur = dur or _parse_iso_dur(item.get("duration"))
+                        iso_str = iso_str or _parse_iso(
+                            item.get("datePublished") or item.get("dateModified")
+                        )
                     elif not iso_str and item.get("@type") in ("NewsArticle", "Article", "WebPage"):
-                        iso_str = parse_iso(item.get("datePublished") or item.get("dateModified"))
+                        iso_str = _parse_iso(
+                            item.get("datePublished") or item.get("dateModified")
+                        )
             except Exception:
                 pass
     except Exception as e:
-        print(f"  Fehler bei {page_url}: {e}", file=sys.stderr)
-    return video_url, iso_str
+        print(f"  Fehler {page_url}: {e}", file=sys.stderr)
+    return video_url, iso_str, dur
 
+# ---------- YouTube ----------
 
-def generate_html(items, updated_at):
-    rows = []
-    for i, (title, page_url, iso, video_url) in enumerate(items, 1):
-        if video_url:
-            link = f'<a href="{video_url}" target="_blank" rel="noopener">{title}</a>'
-        else:
-            link = f'<span class="no-video">{title}</span>'
-        display = format_datetime(iso)
-        date_cell = f'<td class="date">{display}</td>'
-        rows.append(f"<tr><td class='num'>{i}</td>{date_cell}<td>{link}</td></tr>")
+def _fetch_yt():
+    try:
+        r = subprocess.run(
+            ["yt-dlp", "--flat-playlist", "--dump-json",
+             "--playlist-end", str(YT_LIMIT), "--no-warnings", YT_URL],
+            capture_output=True, text=True, timeout=120,
+        )
+    except Exception as e:
+        print(f"  yt-dlp error: {e}", file=sys.stderr)
+        return []
+    items = []
+    seen_keys = set()
+    for line in r.stdout.splitlines():
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        t = d.get("title", "")
+        tl = t.lower()
+        if "highlight" not in tl:
+            continue
+        if "livekommentar" in tl or "live commentary" in tl:
+            continue
+        vid = d.get("id", "")
+        if not vid:
+            continue
+        key = _team_key(t)
+        if key and key in seen_keys:
+            continue
+        if key:
+            seen_keys.add(key)
+        dur = d.get("duration")
+        items.append({
+            "title": t,
+            "url": f"https://www.youtube.com/watch?v={vid}",
+            "duration_sec": int(dur) if dur else None,
+            "team_key": key,
+        })
+    print(f"  {len(items)} YouTube-Highlights.", file=sys.stderr)
+    return items
 
-    rows_html = "\n        ".join(rows)
-    return f"""<!DOCTYPE html>
-<html lang="de">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sportschau Highlights</title>
-  <style>
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
+# ---------- HTML ----------
+
+_CSS = """
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background: #0f0f0f;
       color: #e0e0e0;
       padding: 2rem 1rem;
       max-width: 720px;
       margin: 0 auto;
-    }}
-    h1 {{
-      font-size: 1.4rem;
-      font-weight: 600;
-      margin-bottom: 0.4rem;
-      color: #fff;
-    }}
-    .updated {{
-      font-size: 0.78rem;
-      color: #666;
-      margin-bottom: 2rem;
-    }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-    }}
-    tr + tr {{ border-top: 1px solid #1e1e1e; }}
-    td {{
-      padding: 0.75rem 0.5rem;
-      vertical-align: middle;
-    }}
-    td.num {{
-      color: #555;
-      font-size: 0.85rem;
-      width: 2rem;
-      text-align: right;
-      padding-right: 1rem;
-    }}
-    td.date {{
-      color: #888;
-      font-size: 0.82rem;
-      white-space: nowrap;
-      width: 6.5rem;
-    }}
-    a {{
-      color: #e0e0e0;
-      text-decoration: none;
-      font-size: 0.95rem;
-      line-height: 1.4;
-    }}
-    a:hover {{ color: #fff; text-decoration: underline; }}
-    .no-video {{ color: #555; font-size: 0.95rem; }}
-    @media (max-width: 480px) {{
-      td.date {{ display: none; }}
-    }}
-  </style>
+    }
+    h1 { font-size: 1.35rem; font-weight: 600; margin-bottom: 0.3rem; color: #fff; }
+    .ts { font-size: 0.74rem; color: #444; margin-bottom: 1.8rem; }
+    table { width: 100%; border-collapse: collapse; }
+    tr + tr { border-top: 1px solid #1a1a1a; }
+    td { padding: 0.65rem 0.4rem; vertical-align: top; }
+    td.n {
+      color: #333; font-size: 0.78rem; width: 2rem;
+      text-align: right; padding-right: 0.7rem; padding-top: 0.85rem;
+    }
+    .ti { font-size: 0.93rem; color: #ccc; margin-bottom: 0.3rem; line-height: 1.3; }
+    .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+    .dt { color: #464646; font-size: 0.73rem; margin-right: 1px; }
+    .btn {
+      display: inline-block; padding: 2px 8px; border-radius: 3px;
+      font-size: 0.73rem; font-weight: 500; text-decoration: none; white-space: nowrap;
+    }
+    .ba { background: #162840; color: #5b9bcc; }
+    .ba:hover { background: #1d3654; color: #78b0d8; }
+    .by { background: #380f0f; color: #d45050; }
+    .by:hover { background: #4f1515; color: #e87070; }
+    @media (max-width: 500px) {
+      td.n { display: none; }
+      body { padding: 1.2rem 0.65rem; }
+      .ti { font-size: 0.9rem; }
+    }
+"""
+
+
+def _generate_html(items, ts):
+    rows = []
+    for i, item in enumerate(items, 1):
+        title = item["title"]
+        date_str = _fmt_date(item.get("iso", ""))
+        ard_url = item.get("ard_url")
+        ard_dur = _fmt_dur(item.get("ard_dur"))
+        yt_url = item.get("yt_url")
+        yt_dur = _fmt_dur(item.get("yt_dur"))
+
+        badges = []
+        if ard_url:
+            lbl = f"ARD{(' · ' + ard_dur) if ard_dur else ''}"
+            badges.append(
+                f'<a class="btn ba" href="{ard_url}" target="_blank" rel="noopener">{lbl}</a>'
+            )
+        if yt_url:
+            lbl = f"YT{(' · ' + yt_dur) if yt_dur else ''}"
+            badges.append(
+                f'<a class="btn by" href="{yt_url}" target="_blank" rel="noopener">{lbl}</a>'
+            )
+
+        date_html = f'<span class="dt">{date_str}</span>' if date_str else ""
+        meta = date_html + "".join(badges)
+
+        rows.append(
+            f"<tr>"
+            f"<td class='n'>{i}</td>"
+            f"<td><div class='ti'>{title}</div>"
+            f"<div class='meta'>{meta}</div></td>"
+            f"</tr>"
+        )
+
+    return f"""<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WM 2026 Highlights</title>
+  <style>{_CSS}  </style>
 </head>
 <body>
-  <h1>Sportschau Highlights</h1>
-  <p class="updated">Aktualisiert: {updated_at}</p>
+  <h1>WM 2026 Highlights</h1>
+  <p class="ts">Aktualisiert: {ts}</p>
   <table>
-        {rows_html}
+{"".join(chr(10) + "    " + r for r in rows)}
   </table>
 </body>
 </html>
 """
 
+# ---------- main ----------
+
 
 def main():
     merged = {}
-    for url in SOURCES:
+    for url in SPORTSCHAU_SOURCES:
         print(f"Lade {url} ...", file=sys.stderr)
-        html = fetch(url)
-        items = extract_items(html)
+        html = _http(url)
+        items = _extract_listing(html)
         new = {k: v for k, v in items.items() if k not in merged}
         merged.update(new)
-        print(f"  {len(items)} Highlights, {len(new)} neu. Gesamt: {len(merged)}", file=sys.stderr)
+        print(f"  {len(items)} Highlights, {len(new)} neu → gesamt {len(merged)}", file=sys.stderr)
 
-    print(f"\n{len(merged)} Einträge. Hole Video-URLs ...", file=sys.stderr)
-    items = []
+    print(f"\nHole Video-Details ({len(merged)} Einträge) ...", file=sys.stderr)
+    sp_items = []
     for i, (title, page_url, iso) in enumerate(merged.values(), 1):
         print(f"  [{i}/{len(merged)}] {title}", file=sys.stderr)
-        video_url, page_iso = extract_video_and_iso(page_url)
+        video_url, page_iso, dur = _extract_video(page_url)
         if not iso and page_iso:
             iso = page_iso
-        items.append((title, page_url, iso, video_url))
+        sp_items.append((title, iso, video_url, dur, _team_key(title)))
 
-    # Neueste oben, undatierte ans Ende
-    items.sort(key=lambda x: x[2] if x[2] else "0000", reverse=True)
+    print(f"\nHole YouTube-Highlights ...", file=sys.stderr)
+    yt_list = _fetch_yt()
+    yt_by_key = {yt["team_key"]: yt for yt in yt_list if yt.get("team_key")}
 
-    updated_at = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
-    html_out = generate_html(items, updated_at)
+    combined = []
+    used_keys = set()
+    for title, iso, ard_url, ard_dur, key in sp_items:
+        yt = yt_by_key.get(key) if key else None
+        if key:
+            used_keys.add(key)
+        combined.append({
+            "title": _display_title(title),
+            "iso": iso,
+            "ard_url": ard_url,
+            "ard_dur": ard_dur,
+            "yt_url": yt["url"] if yt else None,
+            "yt_dur": yt["duration_sec"] if yt else None,
+        })
 
+    for key, yt in yt_by_key.items():
+        if key not in used_keys:
+            combined.append({
+                "title": _display_title(yt["title"]),
+                "iso": "",
+                "ard_url": None,
+                "ard_dur": None,
+                "yt_url": yt["url"],
+                "yt_dur": yt["duration_sec"],
+            })
+
+    combined.sort(key=lambda x: x["iso"] or "0000", reverse=True)
+
+    ts = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
     with open("index.html", "w", encoding="utf-8") as f:
-        f.write(html_out)
+        f.write(_generate_html(combined, ts))
     print("index.html geschrieben.", file=sys.stderr)
 
 
