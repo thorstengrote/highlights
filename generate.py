@@ -17,7 +17,8 @@ SPORTSCHAU_SOURCES = [
 ]
 YT_CHANNEL = "https://www.youtube.com/@MAGENTASPORT"
 YT_CHANNEL_ID = "UChr7ZXDFiPOEl543HM4Aj8g"
-YT_LIMIT = 80
+YT_WM_PLAYLIST = "https://www.youtube.com/playlist?list=PLSTUQ-Z10W594c6BwieXpQa1WtbhYSeIV"
+YT_LIMIT = 100
 CEST = timezone(timedelta(hours=2))
 
 # ---------- team normalisation ----------
@@ -384,35 +385,20 @@ def _merge_yt(existing, new_items):
     return existing
 
 
-_YT_SEARCHES = [
-    "/search?query=Highlights+FIFA+WM+2026",
-    "/search?query=FIFA+World+Cup+2026+Highlights",
-    "/search?query=WM+2026+Highlights",
-]
-
-
 def _fetch_yt():
-    raw1 = _ytdlp_fetch(YT_CHANNEL + "/videos")
-    items = _yt_filter(raw1, "yt-dlp /videos")
-    if len(items) < 5:
-        print(f"  sample: {[r['title'][:55] for r in raw1[:3]]}", file=sys.stderr)
+    # Primary: WM 2026 Highlights playlist (geo-independent, curated)
+    raw = _ytdlp_fetch(YT_WM_PLAYLIST)
+    items = _yt_filter(raw, "playlist")
 
-    for query in _YT_SEARCHES:
-        if len(items) >= 10:
-            break
-        raw = _ytdlp_fetch(YT_CHANNEL + query)
-        items = _merge_yt(items, _yt_filter(raw, f"yt-dlp {query[8:30]}"))
-
+    # Fallback: ytInitialData from playlist page
     if len(items) < 5:
-        raw3 = _ythtml_fetch(YT_CHANNEL + "/videos")
-        items = _merge_yt(items, _yt_filter(raw3, "ytInitialData /videos"))
+        raw2 = _ythtml_fetch(YT_WM_PLAYLIST)
+        items = _merge_yt(items, _yt_filter(raw2, "ytInitialData playlist"))
 
+    # Second fallback: channel /videos with high limit
     if len(items) < 5:
-        for query in _YT_SEARCHES[:2]:
-            raw = _ythtml_fetch(YT_CHANNEL + query)
-            items = _merge_yt(items, _yt_filter(raw, f"ytInitialData {query[8:30]}"))
-            if len(items) >= 5:
-                break
+        raw3 = _ytdlp_fetch(YT_CHANNEL + "/videos")
+        items = _merge_yt(items, _yt_filter(raw3, "channel /videos"))
 
     print(f"  → {len(items)} YouTube-Highlights.", file=sys.stderr)
     return items
