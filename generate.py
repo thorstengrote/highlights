@@ -206,18 +206,28 @@ def _fmt_date(iso):
         return ""
 
 def _get_yt_date(video_url):
-    """Fetch publish date from a YouTube video page. Returns date-only 'YYYY-MM-DD' or ''."""
+    """Get publish date for a YouTube video. Returns 'YYYY-MM-DD' or ''."""
+    # Try yt-dlp (reliable on all servers)
+    try:
+        r = subprocess.run(
+            ["yt-dlp", "--dump-json", "--no-playlist", "--no-warnings", video_url],
+            capture_output=True, text=True, timeout=30,
+        )
+        d = json.loads(r.stdout)
+        ud = d.get("upload_date") or ""  # "YYYYMMDD"
+        if len(ud) == 8:
+            return f"{ud[:4]}-{ud[4:6]}-{ud[6:8]}"
+        ts = d.get("timestamp") or d.get("release_timestamp")
+        if ts:
+            return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    # Fallback: scrape ytInitialData
     try:
         html = _http(video_url)
-        # publishDate in ytInitialData: {"simpleText":"17.06.2026"}
         m = re.search(r'"publishDate"\s*:\s*\{"simpleText"\s*:\s*"(\d{2}\.\d{2}\.\d{4})"', html)
         if m:
             day, mon, year = m.group(1).split(".")
-            return f"{year}-{mon}-{day}"
-        # Fallback: dateText
-        m2 = re.search(r'"dateText"\s*:\s*\{"simpleText"\s*:\s*"(\d{2}\.\d{2}\.\d{4})"', html)
-        if m2:
-            day, mon, year = m2.group(1).split(".")
             return f"{year}-{mon}-{day}"
     except Exception:
         pass
