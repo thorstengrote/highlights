@@ -70,6 +70,10 @@ _NORM = {
     "costa rica": "costa rica", "panama": "panama", "honduras": "honduras",
     "jamaika": "jamaica", "jamaica": "jamaica",
     "el salvador": "el salvador", "guatemala": "guatemala",
+    "jordanien": "jordan", "jordan": "jordan",
+    "usbekistan": "uzbekistan", "uzbekistan": "uzbekistan",
+    "china": "china", "indonesien": "indonesia", "indonesia": "indonesia",
+    "neuseeland": "new zealand",
 }
 
 _WM_TEAM_NAMES = set(_NORM.values())
@@ -272,29 +276,42 @@ def _extract_video(page_url):
 
 # ---------- YouTube ----------
 
-def _yt_filter(items_raw, label=""):
-    """Filter for short-form highlight videos, deduplicate by team key."""
-    out = []
-    seen_keys = set()
+def _yt_filter(items_raw, label="", prefer_standard=False):
+    """Filter highlight videos, deduplicate by team key.
+    prefer_standard=True: when standard + livekommentar exist, keep standard.
+    """
+    # Collect per-key best candidate
+    keyed = {}   # key → item (lower priority = standard preferred)
+    unkeyed = []
     for item in items_raw:
         t = item.get("title") or ""
         tl = t.lower()
         if "highlight" not in tl:
             continue
-        if "livekommentar" in tl or "live commentary" in tl or "extended" in tl:
+        if "extended" in tl:
             continue
+        is_lk = "livekommentar" in tl or "live commentary" in tl
         key = _team_key(t)
-        if key and key in seen_keys:
-            continue
+        tagged = {**item, "team_key": key}
         if key:
-            seen_keys.add(key)
-        out.append({**item, "team_key": key})
+            if key not in keyed:
+                keyed[key] = tagged
+            elif prefer_standard and is_lk is False and (
+                "livekommentar" in (keyed[key].get("title") or "").lower()
+                or "live commentary" in (keyed[key].get("title") or "").lower()
+            ):
+                # Replace livekommentar with standard
+                keyed[key] = tagged
+        else:
+            if not is_lk:  # Only add unkeyed items if they're standard
+                unkeyed.append(tagged)
+    out = list(keyed.values()) + unkeyed
     if label:
         print(f"  {label}: {len(out)} aus {len(items_raw)}", file=sys.stderr)
     return out
 
 
-def _ytdlp_fetch(url):
+def _ytdlp_fetch(url, from_playlist=False):
     try:
         r = subprocess.run(
             ["yt-dlp", "--flat-playlist", "--dump-json",
@@ -324,6 +341,7 @@ def _ytdlp_fetch(url):
             "title": d.get("title") or "",
             "url": f"https://www.youtube.com/watch?v={vid}",
             "duration_sec": int(dur) if dur else None,
+            "from_playlist": from_playlist,
         })
     return raw
 
@@ -387,15 +405,18 @@ def _merge_yt(existing, new_items):
 
 def _fetch_yt():
     # Primary: WM 2026 Highlights playlist (geo-independent, curated)
-    raw = _ytdlp_fetch(YT_WM_PLAYLIST)
-    items = _yt_filter(raw, "playlist")
+    # prefer_standard=True: if both standard + livekommentar exist for a game, keep standard
+    raw = _ytdlp_fetch(YT_WM_PLAYLIST, from_playlist=True)
+    items = _yt_filter(raw, "playlist", prefer_standard=True)
 
     # Fallback: ytInitialData from playlist page
     if len(items) < 5:
         raw2 = _ythtml_fetch(YT_WM_PLAYLIST)
-        items = _merge_yt(items, _yt_filter(raw2, "ytInitialData playlist"))
+        for item in raw2:
+            item["from_playlist"] = True
+        items = _merge_yt(items, _yt_filter(raw2, "ytInitialData playlist", prefer_standard=True))
 
-    # Second fallback: channel /videos with high limit
+    # Second fallback: channel /videos
     if len(items) < 5:
         raw3 = _ytdlp_fetch(YT_CHANNEL + "/videos")
         items = _merge_yt(items, _yt_filter(raw3, "channel /videos"))
@@ -545,9 +566,9 @@ def main():
             "yt_dur": yt["duration_sec"] if yt else None,
         })
 
-    # YouTube-only: only add recognised WM national team matches
+    # YouTube-only: add if from the WM playlist (always valid) or recognised WM teams
     for key, yt in yt_by_key.items():
-        if key not in used_keys and _is_wm_team_key(key):
+        if key not in used_keys and (yt.get("from_playlist") or _is_wm_team_key(key)):
             combined.append({
                 "title": _display_title(yt["title"]),
                 "iso": "",
