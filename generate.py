@@ -376,23 +376,35 @@ def _merge_yt(existing, new_items):
     return existing
 
 
+_YT_SEARCHES = [
+    "/search?query=Highlights+FIFA+WM+2026",
+    "/search?query=FIFA+World+Cup+2026+Highlights",
+    "/search?query=WM+2026+Highlights",
+]
+
+
 def _fetch_yt():
     raw1 = _ytdlp_fetch(YT_CHANNEL + "/videos")
     items = _yt_filter(raw1, "yt-dlp /videos")
     if len(items) < 5:
         print(f"  sample: {[r['title'][:55] for r in raw1[:3]]}", file=sys.stderr)
 
-    if len(items) < 5:
-        raw2 = _ytdlp_fetch(YT_CHANNEL + "/search?query=WM+2026+Highlights")
-        items = _merge_yt(items, _yt_filter(raw2, "yt-dlp search"))
+    for query in _YT_SEARCHES:
+        if len(items) >= 10:
+            break
+        raw = _ytdlp_fetch(YT_CHANNEL + query)
+        items = _merge_yt(items, _yt_filter(raw, f"yt-dlp {query[8:30]}"))
 
     if len(items) < 5:
         raw3 = _ythtml_fetch(YT_CHANNEL + "/videos")
         items = _merge_yt(items, _yt_filter(raw3, "ytInitialData /videos"))
 
     if len(items) < 5:
-        raw4 = _ythtml_fetch(YT_CHANNEL + "/search?query=WM+2026+Highlights")
-        items = _merge_yt(items, _yt_filter(raw4, "ytInitialData search"))
+        for query in _YT_SEARCHES[:2]:
+            raw = _ythtml_fetch(YT_CHANNEL + query)
+            items = _merge_yt(items, _yt_filter(raw, f"ytInitialData {query[8:30]}"))
+            if len(items) >= 5:
+                break
 
     print(f"  → {len(items)} YouTube-Highlights.", file=sys.stderr)
     return items
@@ -550,6 +562,9 @@ def main():
                 "yt_url": yt["url"],
                 "yt_dur": yt["duration_sec"],
             })
+
+    # Drop entries with no links at all (audio-only, text summaries)
+    combined = [c for c in combined if c.get("ard_url") or c.get("yt_url")]
 
     combined.sort(key=lambda x: x["iso"] or "0000", reverse=True)
 
