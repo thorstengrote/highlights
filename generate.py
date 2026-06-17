@@ -277,7 +277,7 @@ def _yt_filter(items_raw, label=""):
     out = []
     seen_keys = set()
     for item in items_raw:
-        t = item.get("title", "")
+        t = item.get("title") or ""
         tl = t.lower()
         if "highlight" not in tl:
             continue
@@ -321,7 +321,7 @@ def _ytdlp_fetch(url):
             continue
         dur = d.get("duration")
         raw.append({
-            "title": d.get("title", ""),
+            "title": d.get("title") or "",
             "url": f"https://www.youtube.com/watch?v={vid}",
             "duration_sec": int(dur) if dur else None,
         })
