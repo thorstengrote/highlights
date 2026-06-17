@@ -196,31 +196,29 @@ def _fmt_date(iso):
     if not iso:
         return ""
     try:
+        # Date-only strings (no T component): show without time
+        if "T" not in iso:
+            d = datetime.fromisoformat(iso + "T00:00:00")
+            return d.strftime("%d.%m.")
         dt = datetime.fromisoformat(iso).astimezone(CEST)
-        # Show time only if it's not midnight (i.e., a real timestamp, not just a date)
-        if dt.hour == 0 and dt.minute == 0:
-            return dt.strftime("%d.%m.")
         return dt.strftime("%d.%m. %H:%M")
     except Exception:
         return ""
 
 def _get_yt_date(video_url):
-    """Fetch publish date from a YouTube video page."""
+    """Fetch publish date from a YouTube video page. Returns date-only 'YYYY-MM-DD' or ''."""
     try:
         html = _http(video_url)
-        for blob in re.findall(
-            r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>',
-            html, re.DOTALL | re.IGNORECASE
-        ):
-            try:
-                d = json.loads(blob)
-                for item in (d if isinstance(d, list) else [d]):
-                    if item.get("@type") == "VideoObject":
-                        pub = item.get("datePublished") or item.get("uploadDate")
-                        if pub:
-                            return _parse_iso(pub)
-            except Exception:
-                pass
+        # publishDate in ytInitialData: {"simpleText":"17.06.2026"}
+        m = re.search(r'"publishDate"\s*:\s*\{"simpleText"\s*:\s*"(\d{2}\.\d{2}\.\d{4})"', html)
+        if m:
+            day, mon, year = m.group(1).split(".")
+            return f"{year}-{mon}-{day}"
+        # Fallback: dateText
+        m2 = re.search(r'"dateText"\s*:\s*\{"simpleText"\s*:\s*"(\d{2}\.\d{2}\.\d{4})"', html)
+        if m2:
+            day, mon, year = m2.group(1).split(".")
+            return f"{year}-{mon}-{day}"
     except Exception:
         pass
     return ""
