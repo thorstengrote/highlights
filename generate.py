@@ -70,6 +70,8 @@ _NORM = {
     "el salvador": "el salvador", "guatemala": "guatemala",
 }
 
+_WM_TEAM_NAMES = set(_NORM.values())
+
 
 def _norm_name(name):
     n = re.sub(r"(?i)^(?:die|der|das|dem|den)\s+", "", name.strip().lower())
@@ -82,15 +84,23 @@ def _norm_name(name):
     return n2
 
 
+def _is_wm_team_key(key):
+    """True if both teams in the key are recognised WM national teams."""
+    if not key:
+        return False
+    return all(t in _WM_TEAM_NAMES for t in key.split("|"))
+
+
 def _clean_yt_for_teams(t):
-    """Strip YouTube noise to leave just team names."""
+    """Strip YouTube noise to leave just team names. NOT for Sportschau titles."""
     # Remove emojis and everything after
     t = re.sub(r"[\U0001F000-\U0001FFFF].*", "", t).strip()
     # Remove | suffix
     t = re.split(r"\s*\|", t)[0].strip()
-    # Remove trailing suffixes like "Extended Highlights ...", "Highlights ...", "FIFA ...", "2026 ..."
+    # Remove "Extended Highlights ..." suffix
     t = re.sub(r"\s+(?:Extended\s+)?Highlights?\b.*$", "", t, flags=re.I).strip()
-    t = re.sub(r"\s+(?:FIFA|2026|World Cup|WM)\b.*$", "", t, flags=re.I).strip()
+    # Remove " FIFA ...", " World Cup ..." suffix (not standalone "2026" — too greedy)
+    t = re.sub(r"\s+(?:FIFA\b|World Cup\b).*$", "", t, flags=re.I).strip()
     # Remove comma-separated suffixes
     t = re.sub(r",.*$", "", t).strip()
     return t
@@ -102,7 +112,7 @@ def _team_key(title):
     m = re.match(r"WM \d{4}\s+(.+?)\s+gegen\s+(.+?)(?:\s*-.*)?$", t, re.I)
     if m:
         return "|".join(sorted([_norm_name(m.group(1)), _norm_name(m.group(2))]))
-    # YouTube: clean first, then split
+    # YouTube: clean noise first, then split on separator
     t2 = _clean_yt_for_teams(t)
     parts = re.split(r"\s+(?:vs\.|vs|gegen|-)\s+", t2)
     if len(parts) == 2:
@@ -111,12 +121,17 @@ def _team_key(title):
 
 
 def _display_title(title):
-    """'WM 2026 Iran gegen Neuseeland - ...' → 'Iran – Neuseeland'"""
+    """Return a clean display title."""
     t = title.strip()
+    # Sportschau game: "WM 2026 T1 gegen T2 - die Highlights" → "T1 – T2"
     m = re.match(r"WM \d{4}\s+(.+?)\s+gegen\s+(.+?)(?:\s*-\s*die.*)?$", t, re.I)
     if m:
         strip_art = lambda s: re.sub(r"(?i)^(?:die|der|das|dem|den)\s+", "", s).strip()
         return f"{strip_art(m.group(1))} – {strip_art(m.group(2))}"
+    # Other Sportschau titles (starts with "WM YYYY"): show as-is
+    if re.match(r"WM \d{4}", t, re.I):
+        return t
+    # YouTube title: clean and format
     t2 = _clean_yt_for_teams(t)
     t2 = re.sub(r"\s+vs\.\s+", " – ", t2)
     t2 = re.sub(r"\s+-\s+", " – ", t2)
@@ -253,13 +268,15 @@ def _extract_video(page_url):
 # ---------- YouTube ----------
 
 def _yt_filter(items_raw, label=""):
-    """Filter for highlight videos, deduplicate by team key."""
+    """Filter for short-form highlight videos, deduplicate by team key."""
     out = []
     seen_keys = set()
     for item in items_raw:
         t = item.get("title", "")
         tl = t.lower()
-        if "highlight" not in tl or "livekommentar" in tl or "live commentary" in tl:
+        if "highlight" not in tl:
+            continue
+        if "livekommentar" in tl or "live commentary" in tl or "extended" in tl:
             continue
         key = _team_key(t)
         if key and key in seen_keys:
@@ -268,12 +285,11 @@ def _yt_filter(items_raw, label=""):
             seen_keys.add(key)
         out.append({**item, "team_key": key})
     if label:
-        print(f"  {label}: {len(out)} Highlights aus {len(items_raw)}", file=sys.stderr)
+        print(f"  {label}: {len(out)} aus {len(items_raw)}", file=sys.stderr)
     return out
 
 
 def _ytdlp_fetch(url):
-    """Run yt-dlp --flat-playlist, return raw list."""
     try:
         r = subprocess.run(
             ["yt-dlp", "--flat-playlist", "--dump-json",
@@ -316,7 +332,6 @@ def _find_video_renderers(obj):
 
 
 def _ythtml_fetch(url):
-    """Parse ytInitialData from a YouTube page."""
     try:
         html = _http(url)
         idx = html.find("var ytInitialData = ")
@@ -362,29 +377,22 @@ def _merge_yt(existing, new_items):
 
 
 def _fetch_yt():
-    # Strategy 1: yt-dlp /videos
-    raw = _ytdlp_fetch(YT_CHANNEL + "/videos")
-    items = _yt_filter(raw, "yt-dlp /videos")
+    raw1 = _ytdlp_fetch(YT_CHANNEL + "/videos")
+    items = _yt_filter(raw1, "yt-dlp /videos")
     if len(items) < 5:
-        print(f"  sample: {[r['title'][:50] for r in raw[:3]]}", file=sys.stderr)
+        print(f"  sample: {[r['title'][:55] for r in raw1[:3]]}", file=sys.stderr)
 
-    # Strategy 2: yt-dlp channel search
     if len(items) < 5:
         raw2 = _ytdlp_fetch(YT_CHANNEL + "/search?query=WM+2026+Highlights")
-        items2 = _yt_filter(raw2, "yt-dlp search")
-        items = _merge_yt(items, items2)
+        items = _merge_yt(items, _yt_filter(raw2, "yt-dlp search"))
 
-    # Strategy 3: ytInitialData /videos
     if len(items) < 5:
         raw3 = _ythtml_fetch(YT_CHANNEL + "/videos")
-        items3 = _yt_filter(raw3, "ytInitialData /videos")
-        items = _merge_yt(items, items3)
+        items = _merge_yt(items, _yt_filter(raw3, "ytInitialData /videos"))
 
-    # Strategy 4: ytInitialData channel search
     if len(items) < 5:
         raw4 = _ythtml_fetch(YT_CHANNEL + "/search?query=WM+2026+Highlights")
-        items4 = _yt_filter(raw4, "ytInitialData search")
-        items = _merge_yt(items, items4)
+        items = _merge_yt(items, _yt_filter(raw4, "ytInitialData search"))
 
     print(f"  → {len(items)} YouTube-Highlights.", file=sys.stderr)
     return items
@@ -501,10 +509,10 @@ def main():
             iso = page_iso
         sp_raw.append((title, iso, video_url, dur, _team_key(title)))
 
-    # Deduplicate Sportschau by team_key (keep entry with video URL, or first seen)
+    # Deduplicate Sportschau by team_key (prefer entry with video URL)
     sp_items = []
     sp_seen = set()
-    for item in sp_raw:
+    for item in sorted(sp_raw, key=lambda x: (0 if x[2] else 1)):  # video URL first
         key = item[4]
         if key and key in sp_seen:
             continue
@@ -531,8 +539,9 @@ def main():
             "yt_dur": yt["duration_sec"] if yt else None,
         })
 
+    # YouTube-only: only add recognised WM national team matches
     for key, yt in yt_by_key.items():
-        if key not in used_keys:
+        if key not in used_keys and _is_wm_team_key(key):
             combined.append({
                 "title": _display_title(yt["title"]),
                 "iso": "",
