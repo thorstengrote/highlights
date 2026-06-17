@@ -205,79 +205,9 @@ def _fmt_date(iso):
     except Exception:
         return ""
 
-def _parse_relative_time(text):
-    """'vor 2 Tagen' / '6 hours ago' → 'YYYY-MM-DD' relative to now, or ''."""
-    t = (text or "").lower().strip()
-    now = datetime.now(CEST)
-    patterns = [
-        (r"vor (\d+)\s*minuten?",      "minutes"),
-        (r"vor einer?\s*stunde",       "hours",   1),
-        (r"vor (\d+)\s*stunden?",      "hours"),
-        (r"vor einem?\s*tag",          "days",    1),
-        (r"vor (\d+)\s*tagen?",        "days"),
-        (r"vor einer?\s*woche",        "weeks",   1),
-        (r"vor (\d+)\s*wochen?",       "weeks"),
-        (r"(\d+)\s*minutes?\s+ago",    "minutes"),
-        (r"(\d+)\s*hours?\s+ago",      "hours"),
-        (r"(\d+)\s*days?\s+ago",       "days"),
-        (r"(\d+)\s*weeks?\s+ago",      "weeks"),
-    ]
-    from datetime import timedelta
-    for item in patterns:
-        pat, unit = item[0], item[1]
-        fixed = item[2] if len(item) > 2 else None
-        m = re.search(pat, t)
-        if m or fixed is not None:
-            n = fixed if fixed is not None else int(m.group(1))
-            delta = timedelta(**{unit: n})
-            dt = now - delta
-            return dt.strftime("%Y-%m-%d")
-    return ""
-
-
-# Cache: video_id → approx_date from playlist HTML (fetched once)
-_PLAYLIST_DATE_CACHE = {}
-
-
-def _load_playlist_dates():
-    """Fetch playlist HTML and build video_id → date mapping from publishedTimeText."""
-    global _PLAYLIST_DATE_CACHE
-    if _PLAYLIST_DATE_CACHE:
-        return
-    try:
-        html = _http(YT_WM_PLAYLIST)
-        idx = html.find("var ytInitialData = ")
-        if idx == -1:
-            return
-        idx += len("var ytInitialData = ")
-        data, _ = json.JSONDecoder().raw_decode(html, idx)
-        for vd in _find_video_renderers(data):
-            vid = vd.get("videoId", "")
-            if not vid:
-                continue
-            rel = ((vd.get("publishedTimeText") or {}).get("simpleText", "") or
-                   (vd.get("relativeDate") or {}).get("simpleText", ""))
-            if rel:
-                d = _parse_relative_time(rel)
-                if d:
-                    _PLAYLIST_DATE_CACHE[vid] = d
-    except Exception:
-        pass
-
-
 def _get_yt_date(video_url):
     """Get publish date for a YouTube video. Returns 'YYYY-MM-DD' or ''."""
-    vid_m = re.search(r"v=([A-Za-z0-9_-]+)", video_url)
-    if not vid_m:
-        return ""
-    vid = vid_m.group(1)
-
-    # Try playlist HTML cache first (1 HTTP req for all YT-only videos)
-    _load_playlist_dates()
-    if vid in _PLAYLIST_DATE_CACHE:
-        return _PLAYLIST_DATE_CACHE[vid]
-
-    # Fallback: scrape video page for publishDate
+    # Scrape video page for publishDate (works locally; may fail on GitHub Actions)
     try:
         html = _http(video_url)
         m = re.search(r'"publishDate"\s*:\s*\{"simpleText"\s*:\s*"(\d{2}\.\d{2}\.\d{4})"', html)
