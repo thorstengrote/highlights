@@ -15,7 +15,7 @@ SPORTSCHAU_SOURCES = [
     "https://www.sportschau.de/thema/highlights",
     "https://www.sportschau.de/fussball/fifa-wm-2026/?typ=video",
 ]
-YT_URL = "https://www.youtube.com/@MAGENTASPORT/videos"
+YT_CHANNEL = "https://www.youtube.com/@MAGENTASPORT"
 YT_LIMIT = 80
 CEST = timezone(timedelta(hours=2))
 
@@ -61,12 +61,12 @@ _NORM = {
     "österreich": "austria", "osterreich": "austria", "austria": "austria",
     "ungarn": "hungary", "hungary": "hungary",
     "senegal": "senegal", "kamerun": "cameroon", "cameroon": "cameroon",
-    "ghana": "ghana", "nigeria": "nigeria", "kolumbien": "colombia", "colombia": "colombia",
-    "ecuador": "ecuador", "chile": "chile", "bolivien": "bolivia", "bolivia": "bolivia",
-    "peru": "peru", "venezuela": "venezuela", "jamaika": "jamaica", "jamaica": "jamaica",
+    "ghana": "ghana", "nigeria": "nigeria",
+    "kolumbien": "colombia", "colombia": "colombia",
+    "ecuador": "ecuador", "chile": "chile",
     "costa rica": "costa rica", "panama": "panama", "honduras": "honduras",
+    "jamaika": "jamaica", "jamaica": "jamaica",
     "el salvador": "el salvador", "guatemala": "guatemala",
-    "neuseeland": "new zealand",
 }
 
 
@@ -101,10 +101,8 @@ def _display_title(title):
     t = title.strip()
     m = re.match(r"WM \d{4}\s+(.+?)\s+gegen\s+(.+?)(?:\s*-\s*die.*)?$", t, re.I)
     if m:
-        t1 = re.sub(r"(?i)^(?:die|der|das|dem|den)\s+", "", m.group(1)).strip()
-        t2 = re.sub(r"(?i)^(?:die|der|das|dem|den)\s+", "", m.group(2)).strip()
-        return f"{t1} – {t2}"
-    # YouTube format
+        strip_art = lambda s: re.sub(r"(?i)^(?:die|der|das|dem|den)\s+", "", s).strip()
+        return f"{strip_art(m.group(1))} – {strip_art(m.group(2))}"
     t2 = re.split(r"\s*\|\s*", t)[0].strip()
     t2 = re.sub(r",\s*(Highlights|FIFA|World Cup).*$", "", t2, flags=re.I).strip()
     t2 = re.sub(r"\s+vs\.\s+", " – ", t2)
@@ -121,6 +119,21 @@ def _parse_iso_dur(d):
         return None
     total = int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60 + int(m.group(3) or 0)
     return total or None
+
+
+def _parse_mmss(text):
+    """'5:32' → 332, '1:05:32' → 3932."""
+    if not text:
+        return None
+    parts = text.split(":")
+    try:
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + int(parts[1])
+        elif len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+    except ValueError:
+        pass
+    return None
 
 
 def _fmt_dur(secs):
@@ -151,7 +164,7 @@ def _fmt_date(iso):
     except Exception:
         return ""
 
-# ---------- Sportschau fetch ----------
+# ---------- Sportschau ----------
 
 def _http(url):
     req = urllib.request.Request(
@@ -227,45 +240,110 @@ def _extract_video(page_url):
 
 # ---------- YouTube ----------
 
-def _fetch_yt():
-    try:
-        r = subprocess.run(
-            ["yt-dlp", "--flat-playlist", "--dump-json",
-             "--playlist-end", str(YT_LIMIT), "--no-warnings", YT_URL],
-            capture_output=True, text=True, timeout=120,
-        )
-    except Exception as e:
-        print(f"  yt-dlp error: {e}", file=sys.stderr)
-        return []
-    items = []
+def _yt_filter(items_raw):
+    """Deduplicate and filter highlight videos from a raw list of {title,url,duration_sec}."""
+    out = []
     seen_keys = set()
-    for line in r.stdout.splitlines():
-        try:
-            d = json.loads(line)
-        except Exception:
-            continue
-        t = d.get("title", "")
+    for item in items_raw:
+        t = item.get("title", "")
         tl = t.lower()
-        if "highlight" not in tl:
-            continue
-        if "livekommentar" in tl or "live commentary" in tl:
-            continue
-        vid = d.get("id", "")
-        if not vid:
+        if "highlight" not in tl or "livekommentar" in tl or "live commentary" in tl:
             continue
         key = _team_key(t)
         if key and key in seen_keys:
             continue
         if key:
             seen_keys.add(key)
+        out.append({**item, "team_key": key})
+    return out
+
+
+def _fetch_yt_ytdlp():
+    """Try yt-dlp --flat-playlist."""
+    try:
+        r = subprocess.run(
+            ["yt-dlp", "--flat-playlist", "--dump-json",
+             "--playlist-end", str(YT_LIMIT), "--no-warnings",
+             YT_CHANNEL + "/videos"],
+            capture_output=True, text=True, timeout=120,
+        )
+        if r.returncode != 0 and r.stderr:
+            print(f"  yt-dlp rc={r.returncode}: {r.stderr[:200]}", file=sys.stderr)
+    except Exception as e:
+        print(f"  yt-dlp unavailable: {e}", file=sys.stderr)
+        return []
+    raw = []
+    for line in r.stdout.splitlines():
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        vid = d.get("id", "")
+        if not vid:
+            continue
         dur = d.get("duration")
-        items.append({
-            "title": t,
+        raw.append({
+            "title": d.get("title", ""),
             "url": f"https://www.youtube.com/watch?v={vid}",
             "duration_sec": int(dur) if dur else None,
-            "team_key": key,
         })
-    print(f"  {len(items)} YouTube-Highlights.", file=sys.stderr)
+    return raw
+
+
+def _find_video_renderers(obj):
+    """Recursively yield videoRenderer-like dicts from ytInitialData."""
+    if isinstance(obj, dict):
+        if "videoId" in obj and "title" in obj:
+            yield obj
+        else:
+            for v in obj.values():
+                yield from _find_video_renderers(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _find_video_renderers(item)
+
+
+def _fetch_yt_html():
+    """Fall back: parse ytInitialData from the YouTube channel page."""
+    try:
+        html = _http(YT_CHANNEL + "/videos")
+        idx = html.find("var ytInitialData = ")
+        if idx == -1:
+            print("  ytInitialData marker not found", file=sys.stderr)
+            return []
+        idx += len("var ytInitialData = ")
+        data, _ = json.JSONDecoder().raw_decode(html, idx)
+    except Exception as e:
+        print(f"  ytInitialData parse error: {e}", file=sys.stderr)
+        return []
+
+    raw = []
+    for vd in _find_video_renderers(data):
+        vid = vd.get("videoId", "")
+        if not vid:
+            continue
+        runs = vd.get("title", {}).get("runs", [])
+        title = "".join(r.get("text", "") for r in runs)
+        if not title:
+            continue
+        dur_text = (vd.get("lengthText") or vd.get("length", {})).get("simpleText", "")
+        raw.append({
+            "title": title,
+            "url": f"https://www.youtube.com/watch?v={vid}",
+            "duration_sec": _parse_mmss(dur_text),
+        })
+    return raw
+
+
+def _fetch_yt():
+    raw = _fetch_yt_ytdlp()
+    if len(raw) < 5:
+        print(f"  yt-dlp returned {len(raw)} items, trying ytInitialData ...", file=sys.stderr)
+        raw2 = _fetch_yt_html()
+        if len(raw2) > len(raw):
+            raw = raw2
+    items = _yt_filter(raw)
+    print(f"  {len(items)} YouTube-Highlights (aus {len(raw)} Videos).", file=sys.stderr)
     return items
 
 # ---------- HTML ----------
@@ -287,9 +365,9 @@ _CSS = """
     td { padding: 0.65rem 0.4rem; vertical-align: top; }
     td.n {
       color: #333; font-size: 0.78rem; width: 2rem;
-      text-align: right; padding-right: 0.7rem; padding-top: 0.85rem;
+      text-align: right; padding-right: 0.7rem; padding-top: 0.82rem;
     }
-    .ti { font-size: 0.93rem; color: #ccc; margin-bottom: 0.3rem; line-height: 1.3; }
+    .ti { font-size: 0.93rem; color: #ccc; margin-bottom: 0.28rem; line-height: 1.3; }
     .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
     .dt { color: #464646; font-size: 0.73rem; margin-right: 1px; }
     .btn {
@@ -311,7 +389,6 @@ _CSS = """
 def _generate_html(items, ts):
     rows = []
     for i, item in enumerate(items, 1):
-        title = item["title"]
         date_str = _fmt_date(item.get("iso", ""))
         ard_url = item.get("ard_url")
         ard_dur = _fmt_dur(item.get("ard_dur"))
@@ -336,7 +413,7 @@ def _generate_html(items, ts):
         rows.append(
             f"<tr>"
             f"<td class='n'>{i}</td>"
-            f"<td><div class='ti'>{title}</div>"
+            f"<td><div class='ti'>{item['title']}</div>"
             f"<div class='meta'>{meta}</div></td>"
             f"</tr>"
         )
@@ -372,7 +449,7 @@ def main():
         merged.update(new)
         print(f"  {len(items)} Highlights, {len(new)} neu → gesamt {len(merged)}", file=sys.stderr)
 
-    print(f"\nHole Video-Details ({len(merged)} Einträge) ...", file=sys.stderr)
+    print(f"\nHole Video-Details ({len(merged)}) ...", file=sys.stderr)
     sp_items = []
     for i, (title, page_url, iso) in enumerate(merged.values(), 1):
         print(f"  [{i}/{len(merged)}] {title}", file=sys.stderr)
