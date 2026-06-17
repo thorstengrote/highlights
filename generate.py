@@ -28,6 +28,7 @@ _NORM = {
     "elfenbeinküste": "ivory coast", "elfenbeinkuste": "ivory coast", "ivory coast": "ivory coast",
     "côte d'ivoire": "ivory coast", "cote d'ivoire": "ivory coast",
     "bosnien und herzegowina": "bosnia", "bosnien": "bosnia",
+    "bosnien-herzegowina": "bosnia",
     "bosnia and herzegovina": "bosnia", "bosnia": "bosnia",
     "tschechien": "czech republic", "czech republic": "czech republic",
     "südkorea": "south korea", "south korea": "south korea",
@@ -81,15 +82,28 @@ def _norm_name(name):
     return n2
 
 
+def _clean_yt_for_teams(t):
+    """Strip YouTube noise to leave just team names."""
+    # Remove emojis and everything after
+    t = re.sub(r"[\U0001F000-\U0001FFFF].*", "", t).strip()
+    # Remove | suffix
+    t = re.split(r"\s*\|", t)[0].strip()
+    # Remove trailing suffixes like "Extended Highlights ...", "Highlights ...", "FIFA ...", "2026 ..."
+    t = re.sub(r"\s+(?:Extended\s+)?Highlights?\b.*$", "", t, flags=re.I).strip()
+    t = re.sub(r"\s+(?:FIFA|2026|World Cup|WM)\b.*$", "", t, flags=re.I).strip()
+    # Remove comma-separated suffixes
+    t = re.sub(r",.*$", "", t).strip()
+    return t
+
+
 def _team_key(title):
     t = title.strip()
     # Sportschau: "WM 2026 [T1] gegen [T2] - die [langen] Highlights"
     m = re.match(r"WM \d{4}\s+(.+?)\s+gegen\s+(.+?)(?:\s*-.*)?$", t, re.I)
     if m:
         return "|".join(sorted([_norm_name(m.group(1)), _norm_name(m.group(2))]))
-    # YouTube: "T1 - T2 | ..." or "T1 vs. T2 | ..."
-    t2 = re.split(r"\s*\|\s*", t)[0].strip()
-    t2 = re.sub(r",\s*(Highlights|FIFA|World Cup).*$", "", t2, flags=re.I).strip()
+    # YouTube: clean first, then split
+    t2 = _clean_yt_for_teams(t)
     parts = re.split(r"\s+(?:vs\.|vs|gegen|-)\s+", t2)
     if len(parts) == 2:
         return "|".join(sorted([_norm_name(parts[0]), _norm_name(parts[1])]))
@@ -103,11 +117,10 @@ def _display_title(title):
     if m:
         strip_art = lambda s: re.sub(r"(?i)^(?:die|der|das|dem|den)\s+", "", s).strip()
         return f"{strip_art(m.group(1))} – {strip_art(m.group(2))}"
-    t2 = re.split(r"\s*\|\s*", t)[0].strip()
-    t2 = re.sub(r",\s*(Highlights|FIFA|World Cup).*$", "", t2, flags=re.I).strip()
+    t2 = _clean_yt_for_teams(t)
     t2 = re.sub(r"\s+vs\.\s+", " – ", t2)
     t2 = re.sub(r"\s+-\s+", " – ", t2)
-    return t2
+    return t2 or title
 
 # ---------- duration ----------
 
@@ -255,12 +268,12 @@ def _yt_filter(items_raw, label=""):
             seen_keys.add(key)
         out.append({**item, "team_key": key})
     if label:
-        print(f"  {label}: {len(out)} Highlights aus {len(items_raw)} Videos", file=sys.stderr)
+        print(f"  {label}: {len(out)} Highlights aus {len(items_raw)}", file=sys.stderr)
     return out
 
 
 def _ytdlp_fetch(url):
-    """Run yt-dlp --flat-playlist on url, return raw list of {title,url,duration_sec}."""
+    """Run yt-dlp --flat-playlist, return raw list."""
     try:
         r = subprocess.run(
             ["yt-dlp", "--flat-playlist", "--dump-json",
@@ -291,7 +304,6 @@ def _ytdlp_fetch(url):
 
 
 def _find_video_renderers(obj):
-    """Recursively yield videoRenderer-like dicts from ytInitialData."""
     if isinstance(obj, dict):
         if "videoId" in obj and "title" in obj:
             yield obj
@@ -304,7 +316,7 @@ def _find_video_renderers(obj):
 
 
 def _ythtml_fetch(url):
-    """Parse ytInitialData from a YouTube page, return raw list."""
+    """Parse ytInitialData from a YouTube page."""
     try:
         html = _http(url)
         idx = html.find("var ytInitialData = ")
@@ -334,7 +346,6 @@ def _ythtml_fetch(url):
 
 
 def _merge_yt(existing, new_items):
-    """Merge new_items into existing list, dedup by team_key and url."""
     seen_keys = {i["team_key"] for i in existing if i.get("team_key")}
     seen_urls = {i["url"] for i in existing}
     for item in new_items:
@@ -351,32 +362,31 @@ def _merge_yt(existing, new_items):
 
 
 def _fetch_yt():
-    """Try multiple strategies to get YouTube highlights."""
-    # Strategy 1: yt-dlp on /videos
+    # Strategy 1: yt-dlp /videos
     raw = _ytdlp_fetch(YT_CHANNEL + "/videos")
     items = _yt_filter(raw, "yt-dlp /videos")
     if len(items) < 5:
-        print(f"  sample titles: {[r['title'][:50] for r in raw[:3]]}", file=sys.stderr)
+        print(f"  sample: {[r['title'][:50] for r in raw[:3]]}", file=sys.stderr)
 
-    # Strategy 2: yt-dlp on channel search
+    # Strategy 2: yt-dlp channel search
     if len(items) < 5:
         raw2 = _ytdlp_fetch(YT_CHANNEL + "/search?query=WM+2026+Highlights")
         items2 = _yt_filter(raw2, "yt-dlp search")
         items = _merge_yt(items, items2)
 
-    # Strategy 3: ytInitialData on /videos
+    # Strategy 3: ytInitialData /videos
     if len(items) < 5:
         raw3 = _ythtml_fetch(YT_CHANNEL + "/videos")
         items3 = _yt_filter(raw3, "ytInitialData /videos")
         items = _merge_yt(items, items3)
 
-    # Strategy 4: ytInitialData on channel search
+    # Strategy 4: ytInitialData channel search
     if len(items) < 5:
         raw4 = _ythtml_fetch(YT_CHANNEL + "/search?query=WM+2026+Highlights")
         items4 = _yt_filter(raw4, "ytInitialData search")
         items = _merge_yt(items, items4)
 
-    print(f"  → {len(items)} YouTube-Highlights gesamt.", file=sys.stderr)
+    print(f"  → {len(items)} YouTube-Highlights.", file=sys.stderr)
     return items
 
 # ---------- HTML ----------
@@ -483,13 +493,24 @@ def main():
         print(f"  {len(items)} Highlights, {len(new)} neu → gesamt {len(merged)}", file=sys.stderr)
 
     print(f"\nHole Video-Details ({len(merged)}) ...", file=sys.stderr)
-    sp_items = []
+    sp_raw = []
     for i, (title, page_url, iso) in enumerate(merged.values(), 1):
         print(f"  [{i}/{len(merged)}] {title}", file=sys.stderr)
         video_url, page_iso, dur = _extract_video(page_url)
         if not iso and page_iso:
             iso = page_iso
-        sp_items.append((title, iso, video_url, dur, _team_key(title)))
+        sp_raw.append((title, iso, video_url, dur, _team_key(title)))
+
+    # Deduplicate Sportschau by team_key (keep entry with video URL, or first seen)
+    sp_items = []
+    sp_seen = set()
+    for item in sp_raw:
+        key = item[4]
+        if key and key in sp_seen:
+            continue
+        if key:
+            sp_seen.add(key)
+        sp_items.append(item)
 
     print(f"\nHole YouTube-Highlights ...", file=sys.stderr)
     yt_list = _fetch_yt()
