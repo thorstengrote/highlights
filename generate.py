@@ -535,6 +535,10 @@ def main():
     print(f"\nHole YouTube-Highlights ...", file=sys.stderr)
     yt_list = _fetch_yt()
     yt_by_key = {yt["team_key"]: yt for yt in yt_list if yt.get("team_key")}
+    print(f"  yt_by_key ({len(yt_by_key)}): {list(yt_by_key.keys())}", file=sys.stderr)
+    sp_keys = {item[4] for item in sp_items if item[4]}
+    print(f"  sp_keys ({len(sp_keys)}): {list(sp_keys)[:8]}", file=sys.stderr)
+    print(f"  matches: {[k for k in yt_by_key if k in sp_keys]}", file=sys.stderr)
 
     combined = []
     used_keys = set()
